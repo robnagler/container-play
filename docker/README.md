@@ -161,9 +161,11 @@ busybox             latest              0064fda8c45d        42 hours ago        
 ```
 
 Wait, what happend? Nothing? The image was rebuilt, but it had exactly the
-same hash as the previous build so docker didn't do anything. This is a
+same contents as the previous build so docker didn't do anything. This is a
 bit strange, but makes a lot of sense in that docker builds are idempotent,
 which makes the process of creating and running a docker image reproducible.
+Docker uses the hash of the image for its ID, which is how it verifies that
+nothing has changed.
 
 #### Building an Application Image
 
@@ -219,6 +221,15 @@ Continuing along with the busybox example, we can introduce
 docker run -p 8000:80 busybox httpd -f
 mkdir -p /www/cgi-bin
 chown www-data:www-data -R /www
+
+do a ps ax to show the process is seen on the host
+
+xu  uname
+
+*** docker logs
+
+
+
 
 <html>Hello $REMOTE_ADDR
 www-data:www-data
