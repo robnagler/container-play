@@ -1,6 +1,6 @@
 # Build from our previous box
 FROM my-app
-MAINTAINER Rob Nagler
+MAINTAINER Radiasoft <docker@radiasoft.net>
 # Environment variables are persisted
 ENV HTTPD_USER=www-data
 ENV HTTPD_ROOT=/www
