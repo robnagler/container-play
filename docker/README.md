@@ -174,6 +174,40 @@ busybox             latest              0064fda8c45d        40 minutes ago      
 M
 ```
 
+#### Containers are not Virtual Machines
+
+A container is not a virtual machine (VM), because it does not emulate
+any hardware. The container processes are running on the host computer
+as any other process, sharing resources between all the other processes
+on the host computer. In a VM, the resources are allocated by the hypervisor,
+which manages the sharing through its own algorithms, outside the control
+of each VM on the host computer.
+
+Here's a way to convince yourself that a docker container is on
+the same computer. Start a `sleep` with a unique number of seconds
+in your Docker container, then run `ps` to see it is there:
+
+```bash
+/ # sleep 123 &
+/ # ps a
+PID   USER     TIME   COMMAND
+    1 root       0:00 sh
+   42 root       0:00 sleep 123
+   43 root       0:00 ps a
+```
+
+In a different window on your host computer, run a `ps a | grep sleep`,
+and you'll see the sleep process:
+
+```bash
+$ ps a | grep sleep
+32327 pts/3    S      0:00 sleep 123
+32350 pts/4    S+     0:00 grep sleep
+```
+
+A container is therefore just a process on your host computer, which
+has restricted access to the host computer's resources.
+
 #### Containers are Ephemeral
 
 One strange thing about Docker containers is that they
@@ -348,7 +382,7 @@ We give the image name, and `run` instantiates the image and runs the command
 `/cfg/hello-world` contained in the image by default. We can override
 the default command, which can be very useful for debugging images.
 
-#### Building a Server
+#### Running a Server
 
 Docker is often used to build servers. There are many features to
 support running servers, a few of which, we'll demonstrate here.
@@ -369,7 +403,7 @@ same tag:
 ```bash
 set -e
 tag=radiasoft/httpd
-name=${basename "$tag")
+name=$(basename "$tag")
 docker rmi "$tag" >&/dev/null || true
 docker build -f Dockerfile-"$name" -t "$tag" .
 ```
@@ -386,10 +420,11 @@ is used to identify `Dockerfile-httpd`.
 ##### Dockerfile-httpd
 
 For tutorial purposes, we'll build the image `radiasoft/httpd`
-off of the `my-app` image we created earlier.
+off of the `my-app` image we created earlier. This shows how
+Docker images are layered.
 
 This new Dockerfile uses a new instruction `ENV` to specify environment
-variables, which are set both in the build and run containers.
+variables:
 
 ```bash
 FROM my-app
@@ -401,17 +436,280 @@ RUN sh /cfg2/provision-httpd.sh
 CMD httpd -f -h $HTTPD_ROOT -u $HTTPD_USER:$HTTPD_USER -p $HTTPD_PORT
 ```
 
-We use two environment variablles `$HTTPD_USER` and `$HTTPD_ROOT`
-to share the configuration between the provisioner and the `CMD`.
+We use two environment variables `$HTTPD_USER` and `$HTTPD_ROOT`
+to share the configuration between the provisioner and the `CMD`.  Both
+the build (provisioning) and execution (run) containers see these
+environment variables, which is convenient.
 
-The default command is `httpd`, which is run in foreground (not daemon)
-mode by passing `-f`. This is
-with user `www-data`
-in the directory `/www`, which we'll populate with a few
-files.
+In our new image, he default command is `httpd` with a number of flags.
+`-h` sets the root of the tree that the httpd will server, which is
+`/www` in this case. `-u` sets the user and group of the httpd process
+after it opens the port. We don't want the server to have root access,
+of course. We use the unprivileged uses `www-data`, which is built
+into Busybox for this purpose.
+
+`-p` sets the port to whatever the value of `$HTTPD_PORT` is at
+run time. The mapping of host to container ports happens at run
+time so we'll need to pass that to the `run` command.
+
+An important flag is `-f` which says to run `httpd` in foreground instead
+of daemon mode (default). Docker containers will exit if the initial
+process (by default the `CMD` value) exits. When a daemon runs, it
+creates a new
+[Linux session](https://www.win.tue.nl/~aeb/linux/lk/lk-10.html#ss10.3)
+which means that the Docker daemon can no longer monitor that process
+so the container exits. That's not what we want so we run the httpd
+in foreground. We'll discuss how to run a docker container in daemon
+mode in a bit.
+
+##### provision-httpd.sh
+
+You probably noticed that the `RUN` command now runs a script
+called `provision-httpd.sh`. This script does the work of setting
+up the files in the image. Here are the non-comment lines of the
+script:
+
+```bash
+set -e
+mkdir -p "$HTTPD_ROOT"/cgi-bin
+install -m 400 /cfg2/index.html "$HTTPD_ROOT"/index.html
+install -m 500 /cfg2/hello-world.cgi "$HTTPD_ROOT"/cgi-bin/hello-world
+chgrp -R "$HTTPD_USER" "$HTTPD_ROOT"
+chmod -R g+rX,a-w "$HTTPD_ROOT"
+chgrp "$HTTPD_USER" /cfg /cfg/hello-world.sh
+chmod g+x /cfg
+chmod g+rx /cfg/hello-world.sh
+```
+
+The script sets up the `/www/cgi-bin` where the `hello-world.cgi`
+[Common Gateway Interface (CGI)](https://en.wikipedia.org/wiki/Common_Gateway_Interface)
+application lives. Other files like `index.html` are installed.
+We give permission for the `www-data` to read all the files in `/www`,
+but `www-data` cannot write anywhere in the tree. At RadiaSoft,
+we use the
+[Principle of Least Privilege](https://en.wikipedia.org/wiki/Principle_of_least_privilege)
+when giving permissions.
+
+One of the advantages of Docker is that
+it allows you to restrict permissions without causing problems
+with reinstalls. Every Docker build starts over at the beginning
+so you don't have to worry about read-only directories or files
+when installing as a non-root user -- something we recommend,
+but don't do in this case to simplify the examples.
+
+#### hello-world.cgi
+
+To make the example more interesting, we have the `hello-world`
+CGI program call `hello-world.sh`, which was installed in
+the base image (`my-app`). We also have it dump some more
+information about the system to help demonstrate how Docker
+shares the same kernel as the host computer:
+
+```bash
+escape_html() {
+    echo "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; '"s/'/\&#39;/g"
+}
+
+cat <<EOF
+Content-Type: text/html
+
+<html>
+<title>Hello</title>
+<body>
+<h4>$(escape_html "$(/cfg/hello-world.sh)")</h4>
+<div style="white-space: pre">
+You are $(escape_html "$REMOTE_ADDR").
+
+My uname is $(escape_html "$(uname -a)").
+I'm running $(escape_html "$SERVER_SOFTWARE").
+</div>
+</body></html>
+EOF
+```
+
+CGI programs write to stdout, which then gets sent to the
+browser. They should specify the `Content-Type`, and in
+our case, should ensure that all HTML is escaped properly.
+We use a simple and restrictive sed script to escape the code,
+and embed the escapes in a single call to `cat`.
+
+##### Build the Server
+
+With all our scripts in place, we can now build the
+container:
+
+```bash
+$ bash build-httpd.sh
+Sending build context to Docker daemon 66.56 kB
+Step 0 : FROM my-app
+ ---> d4f4fbca48a5
+ [...snip...]
+Removing intermediate container 434854fe663e
+Successfully built b4dbda3fd331
+```
+
+You'll see
+a lot more output than with our simple application.
+The `Removing intermediate container` is interesting,
+because each Dockerfile instruction actually creates
+a new container. This can
+[cause confusion)[http://www.markbetz.net/2014/01/31/docker-build-files-the-context-of-the-run-command/],
+because each command is a new shell invocation.
+That's another good reason to use a single
+provisioning script, which executes multiple commands.
+
+##### run-httpd.sh
+
+Now that we have a container built, we can run it. For this
+we use a script, too, called `run-httpd.sh`, which
+calls `docker run`:
+
+```bash
+set -e
+tag=radiasoft/httpd
+name=$(basename "$tag")
+port=8000
+docker rm -f "$name" >&/dev/null || true
+id=$(docker run -d --name="$name" -p "$port:$port" -e HTTPD_PORT="$port" "$tag")
+echo "
+Container id: $id
+
+Point your browser to: http://localhost:$port
+
+Stop with: docker stop $name
+"
+```
+
+Since we want this command to be reentrant, we have it remove
+the existing container even if it is running, using `docker rm -f`.
+This command will fail if the container does not exist so we
+protect it with `|| true`, since the script is run with `set -e`.
+
+The container is started with the `-p` flag to map the host port
+to the container port. This flag allows us to "get outside" the
+container. We set the environment variable `$HTTPD_PORT`
+to this same value so the `httpd` listens on the port 8000 in
+the container, which is then mapped to port 8000 in the host.
+
+As discussed above, the `httpd` runs in foreground but we run
+the docker container in background with the `-d` flag. This
+gives us control of the process at the host level. We can
+use the Docker commands `stop` and `kill` to terminate the
+process.
+
+In general, you want a single process running in the Docker container.
+You can, of course, run as many processes as you like. However,
+this makes process management more difficult. With the
+one-process-per-container approach, you can know how
+to manage processes without thinking about having to
+control processes individually within the container and
+then at a global level on the host.
+
+##### Run the Server
+
+The last step is to invoke `run-httpd.sh` to start the server
+as a daemon:
+
+```bash
+$ bash run-httpd.sh
+
+Container id: b6d7ecafd3cc937b46857a0afe35b04702a22ecae535c899a80bb4271a33c3f4
+
+Point your browser to: http://localhost:8000
+
+Stop with: docker stop httpd
+```
+
+If we point our browser at `http://localhost:8000` we see the
+output of `hello-world.cgi`:
+
+```text
+Hello, World!
+
+
+You are [::ffff:172.17.42.1].
+
+My uname is Linux b6d7ecafd3cc 4.1.8-100.fc21.x86_64 #1 SMP Tue Sep 22 12:13:06 UTC 2015 x86_64 GNU/Linux.
+I'm running busybox httpd/1.24.0.
+```
+
+The first line is the `Hello, World!` from the `hello-world.sh`
+script. The last line displays the CGI variable `$SERVER_SOFTWARE`,
+which shows that we are talking to the Busybox web server.
+
+We also see that the `uname` for the kernel is the host computer.
+We verify this by running `uname -a` in on the host:
+
+```bash
+$ uname -a
+Linux v 4.1.8-100.fc21.x86_64 #1 SMP Tue Sep 22 12:13:06 UTC 2015 x86_64 x86_64 x86_64 GNU/Linux
+```
+
+The kernel identifier is the same `4.1.8-100.fc21.x86_64` in both
+outputs.
+
+Indeed, the lines are almost identical except for differences between
+the Busybox and Fedora `uname` implementations and for the hostname, which is
+`v` on the host computer and `b6d7ecafd3cc` in the Docker container.
+This hostname is the same as the (shorted) container Id, which we
+can see with `docker ps`:
+
+```bash
+$ docker ps
+CONTAINER ID        IMAGE               COMMAND                  CREATED             STATUS              PORTS                    NAMES
+b6d7ecafd3cc        radiasoft/httpd     "/bin/sh -c 'httpd -f"   14 minutes ago      Up 14 minutes       0.0.0.0:8000->8000/tcp   httpd
+```
+
+The one line that's a bit strange is the
+`You are [::ffff:172.17.42.1]`, which takes us into networking
+with Docker.
+
+#### Docker Networking
+
+In order to
+
+You can see that by the `fc21` in the kernel distro
+so when you run `uname` on the host:
+
+There are a few subtleties here. The hostname is different. The Docker
+container's hostname is `fc213ce6cd24`, and the host computer's hostname is `v`.
+Fedora's `uname` provides more information than Busybox's.
 
 
 
+
+The next line displays the CGI variable `$REMOTE_ADDR`,
+which in this configuration is an IPv6 address, which we'll getThe actual
+IPv4 address part is 172.17.42.1, which is the network address of
+the Docker daemon on the host.
+
+In my configuration (Fedora 21 on VirtualBox), the client connects
+via IPv6 so the address begins with ::ffff
+
+
+you don't have issues
+with reinstalling over strict permissions. Setting a directory
+as read-only can be a pain when install software not as root,
+which is the better way to do things in
+
+There's also an `index.html`, which is displayed
+when the top level
+the `/cgi-bin/hello-world` URL
+
+##### Run
+
+
+
+One of the reasons to use a single provisioning script like this
+
+
+##### 100% Reproducible Builds
+
+
+#### Manual builds
+commit
+export
+import tar ball
 
 
 #### Config
@@ -434,20 +732,6 @@ Linux kernel as the host machine:
 / # uname -a
 Linux fc213ce6cd24 4.1.8-100.fc21.x86_64 #1 SMP Tue Sep 22 12:13:06 UTC 2015 x86_64 GNU/Linux
 ```
-
-This command run in the container is talking to the same exact
-kernel as the host computer, which in this case is part of the
-Fedora 21 distro. You can see that by the `fc21` in the kernel
-distro so when you run `uname` on the host:
-
-```bash
-$ uname -a
-Linux v 4.1.8-100.fc21.x86_64 #1 SMP Tue Sep 22 12:13:06 UTC 2015 x86_64 x86_64 x86_64 GNU/Linux
-```
-
-There are a few subtleties here. The hostname is different. The Docker
-container's hostname is `fc213ce6cd24`, and the host computer's hostname is `v`.
-Fedora's `uname` provides more information than Busybox's.
 
 You can run a container in background with `-d`:
 

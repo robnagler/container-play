@@ -4,6 +4,6 @@
 #
 set -e
 tag=radiasoft/httpd
-name=${basename "$tag")
+name=$(basename "$tag")
 docker rmi "$tag" >&/dev/null || true
 docker build -f Dockerfile-"$name" -t "$tag" .
